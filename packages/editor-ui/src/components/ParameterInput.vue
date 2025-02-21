@@ -61,10 +61,11 @@ import { useNodeTypesStore } from '@/stores/nodeTypes.store';
 import { useSettingsStore } from '@/stores/settings.store';
 import { useWorkflowsStore } from '@/stores/workflows.store';
 import { isCredentialOnlyNodeType } from '@/utils/credentialOnlyNodes';
-import { N8nInput, N8nSelect } from 'n8n-design-system';
+import { N8nIcon, N8nInput, N8nInputNumber, N8nOption, N8nSelect } from 'n8n-design-system';
 import type { EventBus } from 'n8n-design-system/utils';
 import { createEventBus } from 'n8n-design-system/utils';
 import { useRouter } from 'vue-router';
+import { useElementSize } from '@vueuse/core';
 
 type Picker = { $emit: (arg0: string, arg1: Date) => void };
 
@@ -90,6 +91,7 @@ type Props = {
 	hideIssues?: boolean;
 	errorHighlight?: boolean;
 	isForCredential?: boolean;
+	canBeOverridden?: boolean;
 };
 
 const props = withDefaults(defineProps<Props>(), {
@@ -116,7 +118,7 @@ const emit = defineEmits<{
 const externalHooks = useExternalHooks();
 const i18n = useI18n();
 const nodeHelpers = useNodeHelpers();
-const { callDebounced } = useDebounce();
+const { debounce } = useDebounce();
 const router = useRouter();
 const workflowHelpers = useWorkflowHelpers({ router });
 const telemetry = useTelemetry();
@@ -365,7 +367,7 @@ const getIssues = computed<string[]>(() => {
 			if (Array.isArray(displayValue.value)) {
 				checkValues = checkValues.concat(displayValue.value);
 			} else {
-				checkValues.push(displayValue.value as string);
+				checkValues.push(displayValue.value);
 			}
 		}
 
@@ -398,6 +400,13 @@ const getIssues = computed<string[]>(() => {
 	return [];
 });
 
+const displayIssues = computed(
+	() =>
+		props.parameter.type !== 'credentialsSelect' &&
+		!isResourceLocatorParameter.value &&
+		getIssues.value.length > 0,
+);
+
 const editorType = computed<EditorType | 'json' | 'code'>(() => {
 	return getArgument<EditorType>('editor');
 });
@@ -421,17 +430,23 @@ const parameterOptions = computed<INodePropertyOptions[] | undefined>(() => {
 	return remoteParameterOptions.value;
 });
 
+const isSwitch = computed(
+	() => props.parameter.type === 'boolean' && !isModelValueExpression.value,
+);
+
+const isTextarea = computed(
+	() => props.parameter.type === 'string' && editorRows.value !== undefined,
+);
+
 const parameterInputClasses = computed(() => {
-	const classes: { [c: string]: boolean } = {
+	const classes: Record<string, boolean> = {
 		droppable: props.droppable,
 		activeDrop: props.activeDrop,
 	};
 
-	const rows = editorRows.value;
-	const isTextarea = props.parameter.type === 'string' && rows !== undefined;
-	const isSwitch = props.parameter.type === 'boolean' && !isModelValueExpression.value;
-
-	if (!isTextarea && !isSwitch) {
+	if (isSwitch.value) {
+		classes['parameter-switch'] = true;
+	} else {
 		classes['parameter-value-container'] = true;
 	}
 
@@ -474,6 +489,10 @@ const shortPath = computed<string>(() => {
 	const short = props.path.split('.');
 	short.shift();
 	return short.join('.');
+});
+
+const parameterId = computed(() => {
+	return `${node.value?.id ?? crypto.randomUUID()}${props.path}`;
 });
 
 const isResourceLocatorParameter = computed<boolean>(() => {
@@ -523,7 +542,7 @@ const isHtmlNode = computed(() => !!node.value && node.value.type === HTML_NODE_
 const isInputTypeString = computed(() => props.parameter.type === 'string');
 const isInputTypeNumber = computed(() => props.parameter.type === 'number');
 
-const isInputDataEmpty = computed(() => ndvStore.isNDVDataEmpty('input'));
+const isInputDataEmpty = computed(() => ndvStore.isInputPanelEmpty);
 const isDropDisabled = computed(
 	() =>
 		props.parameter.noDataExpression ||
@@ -718,6 +737,15 @@ function onResourceLocatorDrop(data: string) {
 	emit('drop', data);
 }
 
+function selectInput() {
+	const inputRef = inputField.value;
+	if (inputRef) {
+		if ('select' in inputRef) {
+			inputRef.select();
+		}
+	}
+}
+
 async function setFocus() {
 	if (['json'].includes(props.parameter.type) && getArgument('alwaysOpenEditWindow')) {
 		displayEditDialog();
@@ -773,9 +801,9 @@ function onTextInputChange(value: string) {
 
 	emit('textInput', parameterData);
 }
-function valueChangedDebounced(value: NodeParameterValueType | {} | Date) {
-	void callDebounced(valueChanged, { debounceTime: 100 }, value);
-}
+
+const valueChangedDebounced = debounce(valueChanged, { debounceTime: 100 });
+
 function onUpdateTextInput(value: string) {
 	valueChanged(value);
 	onTextInputChange(value);
@@ -786,9 +814,7 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 		return;
 	}
 	// Only update the value if it has changed
-	const oldValue = node.value?.parameters
-		? nodeHelpers.getParameterValue(node.value?.parameters, props.parameter.name, '')
-		: undefined;
+	const oldValue = get(node.value, props.path);
 	if (oldValue !== undefined && oldValue === value) {
 		return;
 	}
@@ -833,6 +859,25 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 			parameter: props.parameter.name,
 		});
 	}
+	// Track workflow input data mode change
+	const isWorkflowInputParameter =
+		props.parameter.name === 'inputSource' && props.parameter.default === 'workflowInputs';
+	if (isWorkflowInputParameter) {
+		trackWorkflowInputModeEvent(value as string);
+	}
+}
+
+function trackWorkflowInputModeEvent(value: string) {
+	const telemetryValuesMap: Record<string, string> = {
+		workflowInputs: 'fields',
+		jsonExample: 'json',
+		passthrough: 'all',
+	};
+	telemetry.track('User chose input data mode', {
+		option: telemetryValuesMap[value],
+		workflow_id: workflowsStore.workflowId,
+		node_id: node.value?.id,
+	});
 }
 
 async function optionSelected(command: string) {
@@ -856,6 +901,8 @@ async function optionSelected(command: string) {
 			(!props.modelValue || props.modelValue === '[Object: null]')
 		) {
 			valueChanged('={{ 0 }}');
+		} else if (props.parameter.type === 'multiOptions') {
+			valueChanged(`={{ ${JSON.stringify(props.modelValue)} }}`);
 		} else if (
 			props.parameter.type === 'number' ||
 			props.parameter.type === 'boolean' ||
@@ -883,11 +930,16 @@ async function optionSelected(command: string) {
 		if (isResourceLocatorParameter.value && isResourceLocatorValue(props.modelValue)) {
 			valueChanged({ __rl: true, value, mode: props.modelValue.mode });
 		} else {
-			let newValue = typeof value !== 'undefined' ? value : null;
+			let newValue: NodeParameterValueType | {} = typeof value !== 'undefined' ? value : null;
 
 			if (props.parameter.type === 'string') {
 				// Strip the '=' from the beginning
 				newValue = modelValueString.value ? modelValueString.value.toString().substring(1) : null;
+			} else if (newValue === null) {
+				// Invalid expressions land here
+				if (['number', 'boolean'].includes(props.parameter.type)) {
+					newValue = props.parameter.default;
+				}
 			}
 			valueChanged(newValue);
 		}
@@ -946,7 +998,39 @@ onMounted(() => {
 	});
 });
 
+const { height } = useElementSize(wrapper);
+
+const isSingleLineInput = computed(() => {
+	if (isTextarea.value && !isModelValueExpression.value) {
+		return false;
+	}
+
+	/**
+	 * There is an awkward edge case here with text boxes that automatically
+	 * adjust their row count based on their content:
+	 *
+	 * If we move the overrideButton to the options row due to going multiline,
+	 * the text area gains more width and might return to single line.
+	 * This then causes the overrideButton to move inline, creating a loop which results in flickering UI.
+	 *
+	 * To avoid this, we treat 2 rows of input as single line if we were already single line.
+	 */
+	if (isSingleLineInput.value) {
+		return height.value <= 70;
+	}
+
+	return height.value <= 35;
+});
+
+defineExpose({
+	isSingleLineInput,
+	displaysIssues: displayIssues.value,
+	focusInput: async () => await setFocus(),
+	selectInput: () => selectInput(),
+});
+
 onBeforeUnmount(() => {
+	valueChangedDebounced.cancel();
 	props.eventBus.off('optionSelected', optionSelected);
 });
 
@@ -981,11 +1065,11 @@ watch(remoteParameterOptionsLoading, () => {
 	tempValue.value = displayValue.value as string;
 });
 
-// Focus input field when changing from fixed value to expression
+// Focus input field when changing between fixed and expression
 watch(isModelValueExpression, async (isExpression, wasExpression) => {
-	if (isExpression && !wasExpression) {
+	if (!props.isReadOnly && isExpression !== wasExpression) {
 		await nextTick();
-		inputField.value?.focus();
+		await setFocus();
 	}
 });
 
@@ -1023,7 +1107,16 @@ onUpdated(async () => {
 			@update:model-value="expressionUpdated"
 		></ExpressionEditModal>
 
-		<div class="parameter-input ignore-key-press" :style="parameterInputWrapperStyle">
+		<div
+			:class="[
+				'parameter-input',
+				'ignore-key-press-canvas',
+				{
+					[$style.noRightCornersInput]: canBeOverridden,
+				},
+			]"
+			:style="parameterInputWrapperStyle"
+		>
 			<ResourceLocator
 				v-if="parameter.type === 'resourceLocator'"
 				ref="resourceLocator"
@@ -1059,6 +1152,7 @@ onUpdated(async () => {
 				:expression-edit-dialog-visible="expressionEditDialogVisible"
 				:path="path"
 				:parameter-issues="getIssues"
+				:is-read-only="isReadOnly"
 				@update:model-value="valueChanged"
 				@modal-opener-click="openExpressionEditorModal"
 				@focus="setFocus"
@@ -1089,18 +1183,20 @@ onUpdated(async () => {
 				"
 			>
 				<el-dialog
+					width="calc(100% - var(--spacing-3xl))"
+					:class="$style.modal"
 					:model-value="codeEditDialogVisible"
 					:append-to="`#${APP_MODALS_ELEMENT_ID}`"
-					width="80%"
-					:title="`${i18n.baseText('codeEdit.edit')} ${$locale
+					:title="`${i18n.baseText('codeEdit.edit')} ${i18n
 						.nodeText()
 						.inputLabelDisplayName(parameter, path)}`"
 					:before-close="closeCodeEditDialog"
 					data-test-id="code-editor-fullscreen"
 				>
-					<div :key="codeEditDialogVisible.toString()" class="ignore-key-press code-edit-dialog">
+					<div class="ignore-key-press-canvas code-edit-dialog">
 						<CodeNodeEditor
-							v-if="editorType === 'codeNodeEditor'"
+							v-if="editorType === 'codeNodeEditor' && codeEditDialogVisible"
+							:id="parameterId"
 							:mode="codeEditorMode"
 							:model-value="modelValueString"
 							:default-value="parameter.default"
@@ -1110,7 +1206,7 @@ onUpdated(async () => {
 							@update:model-value="valueChangedDebounced"
 						/>
 						<HtmlEditor
-							v-else-if="editorType === 'htmlEditor'"
+							v-else-if="editorType === 'htmlEditor' && codeEditDialogVisible"
 							:model-value="modelValueString"
 							:is-read-only="isReadOnly"
 							:rows="editorRows"
@@ -1120,7 +1216,7 @@ onUpdated(async () => {
 							@update:model-value="valueChangedDebounced"
 						/>
 						<SqlEditor
-							v-else-if="editorType === 'sqlEditor'"
+							v-else-if="editorType === 'sqlEditor' && codeEditDialogVisible"
 							:model-value="modelValueString"
 							:dialect="getArgument('sqlDialect')"
 							:is-read-only="isReadOnly"
@@ -1129,7 +1225,7 @@ onUpdated(async () => {
 							@update:model-value="valueChangedDebounced"
 						/>
 						<JsEditor
-							v-else-if="editorType === 'jsEditor'"
+							v-else-if="editorType === 'jsEditor' && codeEditDialogVisible"
 							:model-value="modelValueString"
 							:is-read-only="isReadOnly"
 							:rows="editorRows"
@@ -1139,7 +1235,7 @@ onUpdated(async () => {
 						/>
 
 						<JsonEditor
-							v-else-if="parameter.type === 'json'"
+							v-else-if="parameter.type === 'json' && codeEditDialogVisible"
 							:model-value="modelValueString"
 							:is-read-only="isReadOnly"
 							:rows="editorRows"
@@ -1160,8 +1256,8 @@ onUpdated(async () => {
 				></TextEdit>
 
 				<CodeNodeEditor
-					v-if="editorType === 'codeNodeEditor' && isCodeNode"
-					:key="'code-' + codeEditDialogVisible.toString()"
+					v-if="editorType === 'codeNodeEditor' && isCodeNode && !codeEditDialogVisible"
+					:id="parameterId"
 					:mode="codeEditorMode"
 					:model-value="modelValueString"
 					:default-value="parameter.default"
@@ -1172,21 +1268,20 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							v-if="!editorIsReadOnly"
 							data-test-id="code-editor-fullscreen-button"
 							icon="external-link-alt"
 							size="xsmall"
 							class="textarea-modal-opener"
-							:title="$locale.baseText('parameterInput.openEditWindow')"
+							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 						/>
 					</template>
 				</CodeNodeEditor>
 
 				<HtmlEditor
-					v-else-if="editorType === 'htmlEditor'"
-					:key="'html-' + codeEditDialogVisible.toString()"
+					v-else-if="editorType === 'htmlEditor' && !codeEditDialogVisible"
 					:model-value="modelValueString"
 					:is-read-only="isReadOnly"
 					:rows="editorRows"
@@ -1195,12 +1290,12 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							data-test-id="code-editor-fullscreen-button"
 							icon="external-link-alt"
 							size="xsmall"
 							class="textarea-modal-opener"
-							:title="$locale.baseText('parameterInput.openEditWindow')"
+							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 						/>
 					</template>
@@ -1208,7 +1303,6 @@ onUpdated(async () => {
 
 				<SqlEditor
 					v-else-if="editorType === 'sqlEditor'"
-					:key="'sql-' + codeEditDialogVisible.toString()"
 					:model-value="modelValueString"
 					:dialect="getArgument('sqlDialect')"
 					:is-read-only="isReadOnly"
@@ -1216,12 +1310,12 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							data-test-id="code-editor-fullscreen-button"
 							icon="external-link-alt"
 							size="xsmall"
 							class="textarea-modal-opener"
-							:title="$locale.baseText('parameterInput.openEditWindow')"
+							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 						/>
 					</template>
@@ -1229,7 +1323,6 @@ onUpdated(async () => {
 
 				<JsEditor
 					v-else-if="editorType === 'jsEditor'"
-					:key="'js-' + codeEditDialogVisible.toString()"
 					:model-value="modelValueString"
 					:is-read-only="isReadOnly || editorIsReadOnly"
 					:rows="editorRows"
@@ -1237,33 +1330,32 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							v-if="!editorIsReadOnly"
 							data-test-id="code-editor-fullscreen-button"
 							icon="external-link-alt"
 							size="xsmall"
 							class="textarea-modal-opener"
-							:title="$locale.baseText('parameterInput.openEditWindow')"
+							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 						/>
 					</template>
 				</JsEditor>
 
 				<JsonEditor
-					v-else-if="parameter.type === 'json'"
-					:key="'json-' + codeEditDialogVisible.toString()"
+					v-else-if="parameter.type === 'json' && !codeEditDialogVisible"
 					:model-value="modelValueString"
 					:is-read-only="isReadOnly"
 					:rows="editorRows"
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							data-test-id="code-editor-fullscreen-button"
 							icon="external-link-alt"
 							size="xsmall"
 							class="textarea-modal-opener"
-							:title="$locale.baseText('parameterInput.openEditWindow')"
+							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 						/>
 					</template>
@@ -1272,6 +1364,7 @@ onUpdated(async () => {
 				<div v-else-if="editorType" class="readonly-code clickable" @click="displayEditDialog()">
 					<CodeNodeEditor
 						v-if="!codeEditDialogVisible"
+						:id="parameterId"
 						:mode="codeEditorMode"
 						:model-value="modelValueString"
 						:language="editorLanguage"
@@ -1302,7 +1395,7 @@ onUpdated(async () => {
 					@blur="onBlur"
 				>
 					<template #suffix>
-						<n8n-icon
+						<N8nIcon
 							v-if="!isReadOnly && !isSecretParameter"
 							icon="external-link-alt"
 							size="xsmall"
@@ -1422,11 +1515,12 @@ onUpdated(async () => {
 				@focus="setFocus"
 				@blur="onBlur"
 			>
-				<n8n-option
+				<N8nOption
 					v-for="option in parameterOptions"
-					:key="option.value"
+					:key="option.value.toString()"
 					:value="option.value"
 					:label="getOptionsOptionDisplayName(option)"
+					data-test-id="parameter-input-item"
 				>
 					<div class="list-option">
 						<div
@@ -1441,7 +1535,7 @@ onUpdated(async () => {
 							v-n8n-html="getOptionsOptionDescription(option)"
 						></div>
 					</div>
-				</n8n-option>
+				</N8nOption>
 			</N8nSelect>
 
 			<N8nSelect
@@ -1460,9 +1554,9 @@ onUpdated(async () => {
 				@focus="setFocus"
 				@blur="onBlur"
 			>
-				<n8n-option
+				<N8nOption
 					v-for="option in parameterOptions"
-					:key="option.value"
+					:key="option.value.toString()"
 					:value="option.value"
 					:label="getOptionsOptionDisplayName(option)"
 				>
@@ -1474,7 +1568,7 @@ onUpdated(async () => {
 							v-n8n-html="getOptionsOptionDescription(option)"
 						></div>
 					</div>
-				</n8n-option>
+				</N8nOption>
 			</N8nSelect>
 
 			<!-- temporary state of booleans while data is mapped -->
@@ -1494,15 +1588,23 @@ onUpdated(async () => {
 				:disabled="isReadOnly"
 				@update:model-value="valueChanged"
 			/>
-			<div v-if="showDragnDropTip" :class="$style.tip">
+			<div v-if="!isReadOnly && showDragnDropTip" :class="$style.tip">
 				<InlineExpressionTip />
 			</div>
 		</div>
-
-		<ParameterIssues
-			v-if="parameter.type !== 'credentialsSelect' && !isResourceLocatorParameter"
-			:issues="getIssues"
-		/>
+		<div
+			v-if="$slots.overrideButton"
+			:class="[
+				$style.overrideButton,
+				{
+					[$style.overrideButtonStandalone]: isSwitch,
+					[$style.overrideButtonInline]: !isSwitch,
+				},
+			]"
+		>
+			<slot name="overrideButton" />
+		</div>
+		<ParameterIssues v-if="displayIssues" :issues="getIssues" />
 	</div>
 </template>
 
@@ -1523,6 +1625,13 @@ onUpdated(async () => {
 .parameter-actions {
 	display: inline-flex;
 	align-items: center;
+}
+
+.parameter-switch {
+	display: inline-flex;
+	align-self: flex-start;
+	justify-items: center;
+	gap: var(--spacing-xs);
 }
 
 .parameter-input {
@@ -1623,8 +1732,8 @@ onUpdated(async () => {
 
 .textarea-modal-opener {
 	position: absolute;
-	right: 0;
-	bottom: 0;
+	right: 1px;
+	bottom: 1px;
 	background-color: var(--color-code-background);
 	padding: 3px;
 	line-height: 9px;
@@ -1632,6 +1741,8 @@ onUpdated(async () => {
 	border-top-left-radius: var(--border-radius-base);
 	border-bottom-right-radius: var(--border-radius-base);
 	cursor: pointer;
+	border-right: none;
+	border-bottom: none;
 
 	svg {
 		width: 9px !important;
@@ -1653,7 +1764,7 @@ onUpdated(async () => {
 }
 
 .code-edit-dialog {
-	height: 70vh;
+	height: 100%;
 
 	.code-node-editor {
 		height: 100%;
@@ -1661,7 +1772,25 @@ onUpdated(async () => {
 }
 </style>
 
-<style lang="scss" module>
+<style lang="css" module>
+.modal {
+	--dialog-close-top: var(--spacing-m);
+	display: flex;
+	flex-direction: column;
+	overflow: clip;
+	height: calc(100% - var(--spacing-4xl));
+	margin-bottom: 0;
+
+	:global(.el-dialog__header) {
+		padding-bottom: 0;
+	}
+
+	:global(.el-dialog__body) {
+		height: calc(100% - var(--spacing-3xl));
+		padding: var(--spacing-s);
+	}
+}
+
 .tipVisible {
 	--input-border-bottom-left-radius: 0;
 	--input-border-bottom-right-radius: 0;
@@ -1678,5 +1807,27 @@ onUpdated(async () => {
 	box-shadow: 0 2px 6px 0 rgba(#441c17, 0.1);
 	border-bottom-left-radius: 4px;
 	border-bottom-right-radius: 4px;
+}
+
+.noRightCornersInput > * {
+	--input-border-bottom-right-radius: 0;
+	--input-border-top-right-radius: 0;
+}
+
+.overrideButton {
+	align-self: start;
+}
+
+.overrideButtonStandalone {
+	position: relative;
+	/* This is to balance for the extra margin on the switch */
+	top: -2px;
+}
+
+.overrideButtonInline {
+	> button {
+		border-top-left-radius: 0;
+		border-bottom-left-radius: 0;
+	}
 }
 </style>

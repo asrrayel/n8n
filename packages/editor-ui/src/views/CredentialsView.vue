@@ -1,15 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router';
 import type { ICredentialsResponse, ICredentialTypeMap } from '@/Interface';
-import type { IResource } from '@/components/layouts/ResourcesListLayout.vue';
-import ResourcesListLayout from '@/components/layouts/ResourcesListLayout.vue';
+import type { ICredentialType, ICredentialsDecrypted } from 'n8n-workflow';
+import ResourcesListLayout, {
+	type Resource,
+	type BaseFilters,
+} from '@/components/layouts/ResourcesListLayout.vue';
 import CredentialCard from '@/components/CredentialCard.vue';
-import type { ICredentialType } from 'n8n-workflow';
 import {
 	CREDENTIAL_SELECT_MODAL_KEY,
 	CREDENTIAL_EDIT_MODAL_KEY,
 	EnterpriseEditionFeature,
+	VIEWS,
 } from '@/constants';
 import { useUIStore, listenForModalChanges } from '@/stores/ui.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
@@ -19,12 +22,15 @@ import { useSourceControlStore } from '@/stores/sourceControl.store';
 import { useProjectsStore } from '@/stores/projects.store';
 import useEnvironmentsStore from '@/stores/environments.ee.store';
 import { useSettingsStore } from '@/stores/settings.store';
-import ProjectTabs from '@/components/Projects/ProjectTabs.vue';
+import { useUsersStore } from '@/stores/users.store';
 import { getResourcePermissions } from '@/permissions';
 import { useDocumentTitle } from '@/composables/useDocumentTitle';
 import { useTelemetry } from '@/composables/useTelemetry';
 import { useI18n } from '@/composables/useI18n';
-import { N8nButton, N8nInputLabel, N8nSelect, N8nOption } from 'n8n-design-system';
+import ProjectHeader from '@/components/Projects/ProjectHeader.vue';
+import { N8nCheckbox } from 'n8n-design-system';
+import { pickBy } from 'lodash-es';
+import { CREDENTIAL_EMPTY_VALUE } from 'n8n-workflow';
 
 const props = defineProps<{
 	credentialId?: string;
@@ -36,6 +42,7 @@ const uiStore = useUIStore();
 const sourceControlStore = useSourceControlStore();
 const externalSecretsStore = useExternalSecretsStore();
 const projectsStore = useProjectsStore();
+const usersStore = useUsersStore();
 
 const documentTitle = useDocumentTitle();
 const route = useRoute();
@@ -43,15 +50,31 @@ const router = useRouter();
 const telemetry = useTelemetry();
 const i18n = useI18n();
 
-const filters = ref({
-	search: '',
-	homeProject: '',
-	type: '',
-});
+type Filters = BaseFilters & { type?: string[]; setupNeeded?: boolean };
+const updateFilter = (state: Filters) => {
+	void router.replace({ query: pickBy(state) as LocationQueryRaw });
+};
 
+const onSearchUpdated = (search: string) => {
+	updateFilter({ ...filters.value, search });
+};
+
+const filters = ref<Filters>({
+	...route.query,
+	setupNeeded: route.query.setupNeeded?.toString() === 'true',
+} as Filters);
 const loading = ref(false);
 
-const allCredentials = computed<IResource[]>(() =>
+const needsSetup = (data: string | undefined): boolean => {
+	const dataObject = data as unknown as ICredentialsDecrypted['data'];
+	if (!dataObject) return false;
+
+	if (Object.keys(dataObject).length === 0) return true;
+
+	return Object.values(dataObject).every((value) => !value || value === CREDENTIAL_EMPTY_VALUE);
+};
+
+const allCredentials = computed<Resource[]>(() =>
 	credentialsStore.allCredentials.map((credential) => ({
 		id: credential.id,
 		name: credential.name,
@@ -63,6 +86,7 @@ const allCredentials = computed<IResource[]>(() =>
 		type: credential.type,
 		sharedWithProjects: credential.sharedWithProjects,
 		readOnly: !getResourcePermissions(credential.scopes).credential.update,
+		needsSetup: needsSetup(credential.data),
 	})),
 );
 
@@ -70,12 +94,6 @@ const allCredentialTypes = computed<ICredentialType[]>(() => credentialsStore.al
 
 const credentialTypesById = computed<ICredentialTypeMap>(
 	() => credentialsStore.credentialTypesById,
-);
-
-const addCredentialButtonText = computed(() =>
-	projectsStore.currentProject
-		? i18n.baseText('credentials.project.add')
-		: i18n.baseText('credentials.add'),
 );
 
 const readOnlyEnv = computed(() => sourceControlStore.preferences.branchReadOnly);
@@ -87,7 +105,7 @@ const projectPermissions = computed(() =>
 );
 
 const setRouteCredentialId = (credentialId?: string) => {
-	void router.replace({ params: { credentialId } });
+	void router.replace({ params: { credentialId }, query: route.query });
 };
 
 const addCredential = () => {
@@ -101,35 +119,16 @@ listenForModalChanges({
 	store: uiStore,
 	onModalClosed(modalName) {
 		if ([CREDENTIAL_SELECT_MODAL_KEY, CREDENTIAL_EDIT_MODAL_KEY].includes(modalName as string)) {
-			void router.replace({ params: { credentialId: '' } });
+			void router.replace({ params: { credentialId: '' }, query: route.query });
 		}
 	},
 });
 
-watch(
-	() => props.credentialId,
-	(id) => {
-		if (!id) return;
-
-		if (id === 'create') {
-			uiStore.openModal(CREDENTIAL_SELECT_MODAL_KEY);
-			return;
-		}
-
-		uiStore.openExistingCredential(id);
-	},
-	{
-		immediate: true,
-	},
-);
-
-const onFilter = (
-	resource: ICredentialsResponse,
-	filtersToApply: { type: string[]; search: string },
-	matches: boolean,
-): boolean => {
-	if (filtersToApply.type.length > 0) {
-		matches = matches && filtersToApply.type.includes(resource.type);
+const onFilter = (resource: Resource, newFilters: BaseFilters, matches: boolean): boolean => {
+	const Resource = resource as ICredentialsResponse & { needsSetup: boolean };
+	const filtersToApply = newFilters as Filters;
+	if (filtersToApply.type && filtersToApply.type.length > 0) {
+		matches = matches && filtersToApply.type.includes(Resource.type);
 	}
 
 	if (filtersToApply.search) {
@@ -137,11 +136,37 @@ const onFilter = (
 
 		matches =
 			matches ||
-			(credentialTypesById.value[resource.type] &&
-				credentialTypesById.value[resource.type].displayName.toLowerCase().includes(searchString));
+			(credentialTypesById.value[Resource.type] &&
+				credentialTypesById.value[Resource.type].displayName.toLowerCase().includes(searchString));
+	}
+
+	if (filtersToApply.setupNeeded) {
+		matches = matches && Resource.needsSetup;
 	}
 
 	return matches;
+};
+
+const maybeCreateCredential = () => {
+	if (props.credentialId === 'create') {
+		if (projectPermissions.value.credential.create) {
+			uiStore.openModal(CREDENTIAL_SELECT_MODAL_KEY);
+		} else {
+			void router.replace({ name: VIEWS.HOMEPAGE });
+		}
+	}
+};
+
+const maybeEditCredential = () => {
+	if (!!props.credentialId && props.credentialId !== 'create') {
+		const credential = credentialsStore.getCredentialById(props.credentialId);
+		const credentialPermissions = getResourcePermissions(credential?.scopes).credential;
+		if (credential && (credentialPermissions.update || credentialPermissions.read)) {
+			uiStore.openExistingCredential(props.credentialId);
+		} else {
+			void router.replace({ name: VIEWS.HOMEPAGE });
+		}
+	}
 };
 
 const initialize = async () => {
@@ -158,8 +183,18 @@ const initialize = async () => {
 	];
 
 	await Promise.all(loadPromises);
+	maybeCreateCredential();
+	maybeEditCredential();
 	loading.value = false;
 };
+
+credentialsStore.$onAction(({ name, after }) => {
+	if (name === 'createNewCredential') {
+		after(() => {
+			void credentialsStore.fetchAllCredentials(route?.params?.projectId as string | undefined);
+		});
+	}
+});
 
 sourceControlStore.$onAction(({ name, after }) => {
 	if (name !== 'pullWorkfolder') return;
@@ -170,6 +205,14 @@ sourceControlStore.$onAction(({ name, after }) => {
 
 watch(() => route?.params?.projectId, initialize);
 
+watch(
+	() => props.credentialId,
+	() => {
+		maybeCreateCredential();
+		maybeEditCredential();
+	},
+);
+
 onMounted(() => {
 	documentTitle.set(i18n.baseText('credentials.heading'));
 });
@@ -178,32 +221,19 @@ onMounted(() => {
 <template>
 	<ResourcesListLayout
 		ref="layout"
+		v-model:filters="filters"
 		resource-key="credentials"
 		:resources="allCredentials"
 		:initialize="initialize"
-		:filters="filters"
 		:additional-filters-handler="onFilter"
 		:type-props="{ itemSize: 77 }"
 		:loading="loading"
 		:disabled="readOnlyEnv || !projectPermissions.credential.create"
-		@click:add="addCredential"
-		@update:filters="filters = $event"
+		@update:filters="updateFilter"
+		@update:search="onSearchUpdated"
 	>
 		<template #header>
-			<ProjectTabs />
-		</template>
-		<template #add-button="{ disabled }">
-			<div>
-				<N8nButton
-					size="large"
-					block
-					:disabled="disabled"
-					data-test-id="resources-list-add"
-					@click="addCredential"
-				>
-					{{ addCredentialButtonText }}
-				</N8nButton>
-			</div>
+			<ProjectHeader />
 		</template>
 		<template #default="{ data }">
 			<CredentialCard
@@ -211,6 +241,7 @@ onMounted(() => {
 				class="mb-2xs"
 				:data="data"
 				:read-only="data.readOnly"
+				:needs-setup="data.needsSetup"
 				@click="setRouteCredentialId"
 			/>
 		</template>
@@ -240,6 +271,53 @@ onMounted(() => {
 					/>
 				</N8nSelect>
 			</div>
+			<div class="mb-s">
+				<N8nInputLabel
+					:label="i18n.baseText('credentials.filters.status')"
+					:bold="false"
+					size="small"
+					color="text-base"
+					class="mb-3xs"
+				/>
+
+				<N8nCheckbox
+					:label="i18n.baseText('credentials.filters.setup')"
+					data-test-id="credential-filter-setup-needed"
+					:model-value="filters.setupNeeded"
+					@update:model-value="setKeyValue('setupNeeded', $event)"
+				>
+				</N8nCheckbox>
+			</div>
+		</template>
+		<template #empty>
+			<n8n-action-box
+				data-test-id="empty-resources-list"
+				emoji="👋"
+				:heading="
+					i18n.baseText(
+						usersStore.currentUser?.firstName
+							? 'credentials.empty.heading'
+							: 'credentials.empty.heading.userNotSetup',
+						{
+							interpolate: { name: usersStore.currentUser?.firstName ?? '' },
+						},
+					)
+				"
+				:description="i18n.baseText('credentials.empty.description')"
+				:button-text="i18n.baseText('credentials.empty.button')"
+				button-type="secondary"
+				:button-disabled="readOnlyEnv || !projectPermissions.credential.create"
+				:button-icon="readOnlyEnv ? 'lock' : undefined"
+				@click:button="addCredential"
+			>
+				<template #disabledButtonTooltip>
+					{{
+						readOnlyEnv
+							? i18n.baseText('readOnlyEnv.cantAdd.credential')
+							: i18n.baseText('credentials.empty.button.disabled.tooltip')
+					}}
+				</template>
+			</n8n-action-box>
 		</template>
 	</ResourcesListLayout>
 </template>

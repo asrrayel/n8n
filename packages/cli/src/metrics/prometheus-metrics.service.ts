@@ -1,11 +1,11 @@
 import { GlobalConfig } from '@n8n/config';
+import { Service } from '@n8n/di';
 import type express from 'express';
 import promBundle from 'express-prom-bundle';
 import { InstanceSettings } from 'n8n-core';
 import { EventMessageTypeNames } from 'n8n-workflow';
 import promClient, { type Counter, type Gauge } from 'prom-client';
 import semverParse from 'semver/functions/parse';
-import { Service } from 'typedi';
 
 import config from '@/config';
 import { N8N_VERSION } from '@/constants';
@@ -117,7 +117,8 @@ export class PrometheusMetricsService {
 	}
 
 	/**
-	 * Set up metrics for server routes with `express-prom-bundle`
+	 * Set up metrics for server routes with `express-prom-bundle`. The same
+	 * middleware is also utilized for an instance activity metric
 	 */
 	private initRouteMetrics(app: express.Application) {
 		if (!this.includes.metrics.routes) return;
@@ -130,18 +131,31 @@ export class PrometheusMetricsService {
 			includeStatusCode: this.includes.labels.apiStatusCode,
 		});
 
+		const activityGauge = new promClient.Gauge({
+			name: this.prefix + 'last_activity',
+			help: 'last instance activity (backend request).',
+			labelNames: ['timestamp'],
+		});
+
+		activityGauge.set({ timestamp: new Date().toISOString() }, 1);
+
 		app.use(
 			[
-				'/rest/',
 				'/api/',
-				'/webhook/',
-				'/webhook-waiting/',
-				'/webhook-test/',
-				'/form/',
-				'/form-waiting/',
-				'/form-test/',
+				`/${this.globalConfig.endpoints.rest}/`,
+				`/${this.globalConfig.endpoints.webhook}/`,
+				`/${this.globalConfig.endpoints.webhookWaiting}/`,
+				`/${this.globalConfig.endpoints.webhookTest}/`,
+				`/${this.globalConfig.endpoints.form}/`,
+				`/${this.globalConfig.endpoints.formWaiting}/`,
+				`/${this.globalConfig.endpoints.formTest}/`,
 			],
-			metricsMiddleware,
+			(req, res, next) => {
+				activityGauge.reset();
+				activityGauge.set({ timestamp: new Date().toISOString() }, 1);
+
+				metricsMiddleware(req, res, next);
+			},
 		);
 	}
 

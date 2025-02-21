@@ -6,10 +6,14 @@ import AnnotationTagsDropdown from '@/components/AnnotationTagsDropdown.ee.vue';
 import { createEventBus } from 'n8n-design-system';
 import VoteButtons from '@/components/executions/workflow/VoteButtons.vue';
 import { useToast } from '@/composables/useToast';
+import { useI18n } from '@/composables/useI18n';
+import { useTelemetry } from '@/composables/useTelemetry';
 
 const executionsStore = useExecutionsStore();
 
 const { showError } = useToast();
+const i18n = useI18n();
+const telemetry = useTelemetry();
 
 const tagsEventBus = createEventBus();
 const isTagsEditEnabled = ref(false);
@@ -79,6 +83,13 @@ const onTagsBlur = async () => {
 
 	try {
 		await executionsStore.annotateExecution(activeExecution.value.id, { tags: newTagIds });
+
+		if (newTagIds.length > 0) {
+			telemetry.track('User added execution annotation tag', {
+				tag_ids: newTagIds,
+				execution_id: activeExecution.value.id,
+			});
+		}
 	} catch (e) {
 		showError(e, 'executionAnnotationView.tag.error');
 	}
@@ -100,7 +111,7 @@ const onTagsEditEsc = () => {
 	>
 		<div :class="$style.section">
 			<div :class="$style.vote">
-				<div>{{ $locale.baseText('generic.rating') }}</div>
+				<div>{{ i18n.baseText('generic.rating') }}</div>
 				<VoteButtons :vote="vote" @vote-click="onVoteClick" />
 			</div>
 			<span :class="$style.tags" data-test-id="annotation-tags-container">
@@ -110,7 +121,7 @@ const onTagsEditEsc = () => {
 					v-model="appliedTagIds"
 					:create-enabled="true"
 					:event-bus="tagsEventBus"
-					:placeholder="$locale.baseText('executionAnnotationView.chooseOrCreateATag')"
+					:placeholder="i18n.baseText('executionAnnotationView.chooseOrCreateATag')"
 					class="tags-edit"
 					data-test-id="workflow-tags-dropdown"
 					@blur="onTagsBlur"
@@ -122,7 +133,7 @@ const onTagsEditEsc = () => {
 						data-test-id="new-tag-link"
 						@click="onTagsEditEnable"
 					>
-						+ {{ $locale.baseText('executionAnnotationView.addTag') }}
+						+ {{ i18n.baseText('executionAnnotationView.addTag') }}
 					</span>
 				</div>
 
@@ -143,7 +154,7 @@ const onTagsEditEsc = () => {
 					<span :class="$style.addTagWrapper">
 						<n8n-button
 							:class="$style.addTag"
-							:label="`+ ` + $locale.baseText('executionAnnotationView.addTag')"
+							:label="`+ ` + i18n.baseText('executionAnnotationView.addTag')"
 							type="secondary"
 							size="mini"
 							:outline="false"
@@ -157,7 +168,7 @@ const onTagsEditEsc = () => {
 		<div :class="$style.section">
 			<div :class="$style.heading">
 				<n8n-heading tag="h3" size="small" color="text-dark">
-					{{ $locale.baseText('generic.annotationData') }}
+					{{ i18n.baseText('generic.annotationData') }}
 				</n8n-heading>
 			</div>
 			<div
@@ -179,7 +190,7 @@ const onTagsEditEsc = () => {
 			</div>
 			<div v-else :class="$style.noResultsContainer" data-test-id="execution-annotation-data-empty">
 				<n8n-text color="text-base" size="small" align="center">
-					<span v-n8n-html="$locale.baseText('executionAnnotationView.data.notFound')" />
+					<span v-n8n-html="i18n.baseText('executionAnnotationView.data.notFound')" />
 				</n8n-text>
 			</div>
 		</div>

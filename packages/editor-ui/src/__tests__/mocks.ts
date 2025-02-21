@@ -12,7 +12,7 @@ import type {
 	INodeIssues,
 } from 'n8n-workflow';
 import { NodeConnectionType, NodeHelpers, Workflow } from 'n8n-workflow';
-import { uuid } from '@jsplumb/util';
+import { v4 as uuid } from 'uuid';
 import { mock } from 'vitest-mock-extended';
 
 import {
@@ -54,26 +54,32 @@ export const mockNodeTypeDescription = ({
 	credentials = [],
 	inputs = [NodeConnectionType.Main],
 	outputs = [NodeConnectionType.Main],
+	codex = undefined,
+	properties = [],
 }: {
 	name?: INodeTypeDescription['name'];
 	version?: INodeTypeDescription['version'];
 	credentials?: INodeTypeDescription['credentials'];
 	inputs?: INodeTypeDescription['inputs'];
 	outputs?: INodeTypeDescription['outputs'];
+	codex?: INodeTypeDescription['codex'];
+	properties?: INodeTypeDescription['properties'];
 } = {}) =>
 	mock<INodeTypeDescription>({
 		name,
 		displayName: name,
+		description: '',
 		version,
 		defaults: {
 			name,
 		},
 		defaultVersion: Array.isArray(version) ? version[version.length - 1] : version,
-		properties: [],
+		properties: properties as [],
 		maxNodes: Infinity,
 		group: EXECUTABLE_TRIGGER_NODE_TYPES.includes(name) ? ['trigger'] : [],
 		inputs,
 		outputs,
+		codex,
 		credentials,
 		documentationUrl: 'https://docs',
 		webhooks: undefined,
